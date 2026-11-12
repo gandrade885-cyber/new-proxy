@@ -451,51 +451,71 @@ async function connect(showAll) {
     const dev = await navigator.bluetooth.requestDevice(opts);
     await attach(dev);
   } catch (e) {
-    chip('Desconectado'); log('falha: ' + (e && (e.step || '') + ' ' + e.message));
+    chip('Desconectado'); log('falha final: ' + errText(e));
     if (e && e.name === 'NotFoundError') notice('Nenhum aparelho escolhido. Se o Proxy não apareceu: acorde o Proxy apertando o botão, feche de vez o app oficial da Puffco (e o Path Browser) e tente de novo. Ou <button class="btn" type="button" id="show-all">procurar todos os aparelhos</button>');
     else if (e && e.name === 'SecurityError') notice('O Mac bloqueou o Bluetooth para o Chrome. Abra Ajustes do Sistema › Privacidade e Segurança › Bluetooth e ative o Google Chrome.', 'err');
     else notice('Não consegui conectar. <small>(' + (e && e.message || e) + ')</small><br>Tente: feche o app oficial da Puffco, aperte o botão do Proxy para acordar e toque em Conectar. Se continuar, abra <b>Diagnóstico da conexão</b> e me mande o texto.', 'err');
   }
 }
+const errText = e => !e ? 'sem detalhe' : ((e.name && e.name !== 'Error' ? e.name + ': ' : '') + (e.message || String(e) || 'sem detalhe'));
+// The Proxy asks the iPhone to pair (bond) the first time; iOS shows a "Solicitação de Emparelhamento" and the link
+// often drops once while that happens. So the whole setup is retried a few times before giving up.
 async function attach(dev) {
   stopDemo();
-  S.dev = dev; dev.addEventListener('gattserverdisconnected', onDisconnect);
-  log('aparelho: ' + (dev.name || '(sem nome)'));
-  chip('Conectando…', 'busy');
+  S.dev = dev; if (!dev.__np) { dev.addEventListener('gattserverdisconnected', onDisconnect); dev.__np = true; }
+  log('aparelho: ' + (dev.name || '(sem nome)') + ' · navegador: ' + (navigator.userAgent.match(/Bluefy|Path|CriOS|Chrome|Safari/) || ['?'])[0]);
+  let last = null;
+  for (let attempt = 1; attempt <= 3; attempt++) {
+    try { S.setup = true; await setup(dev, attempt); S.setup = false; return; }
+    catch (e) {
+      last = e; S.setup = false; log('tentativa ' + attempt + ' falhou: ' + errText(e));
+      try { if (dev.gatt.connected) dev.gatt.disconnect(); } catch (er) {}
+      S.server = null; S.cmd = null;
+      if (attempt < 3) { chip('Tentando de novo…', 'busy'); notice('Se o iPhone mostrar <b>Solicitação de Emparelhamento</b>, toque em <b>Emparelhar</b>.', 'ok'); await wait(2000); }
+    }
+  }
+  throw last;
+}
+async function setup(dev, attempt) {
   let lastErr = null;
-  const step = (label, e) => { const er = new Error(label + ' — ' + ((e && e.message) || e || 'sem resposta')); er.name = (e && e.name) || 'Error'; er.step = label; return er; };
-  for (let i = 0; i < 4 && !(S.server && S.server.connected); i++) { try { chip('Conectando… (' + (i + 1) + '/4)', 'busy'); S.server = await limit(dev.gatt.connect(), 8000); } catch (e) { lastErr = e; S.server = null; try { dev.gatt.disconnect(); } catch (er) {} await wait(1200); } }
-  if (!S.server) throw step('etapa 1 (ligar a conexão)', lastErr);
-  log('conexão aberta'); await wait(500);
+  const step = (label, e) => { const er = new Error(label + ' — ' + errText(e)); er.name = (e && e.name) || 'Error'; er.step = label; return er; };
+  chip('Conectando… (' + attempt + '/3)', 'busy');
+  try { S.server = await limit(dev.gatt.connect(), 10000, 'a conexão'); } catch (e) { throw step('etapa 1 (abrir a conexão)', e); }
+  log('etapa 1 ok: conexão aberta'); await wait(600);
   let svc = null;
   for (let i = 0; i < 3 && !svc; i++) {
-    try { svc = await limit(S.server.getPrimaryService(SVC), 6000); } catch (e) { lastErr = e; }
-    if (!svc) { try { const all = await limit(S.server.getPrimaryServices(), 6000); log('serviços: ' + all.map(s => s.uuid).join(', ')); svc = all.find(s => (s.uuid || '').toLowerCase() === SVC) || null; } catch (e) { lastErr = e; } }
+    if (!S.server.connected) throw step('etapa 2 (serviço)', new Error('o Proxy desligou a conexão'));
+    try { svc = await limit(S.server.getPrimaryService(SVC), 6000, 'a lista de serviços'); } catch (e) { lastErr = e; }
+    if (!svc) { try { const all = await limit(S.server.getPrimaryServices(), 6000, 'a lista de serviços'); log('serviços vistos: ' + (all.map(x => x.uuid).join(', ') || 'nenhum')); svc = all.find(x => (x.uuid || '').toLowerCase() === SVC) || null; } catch (e) { lastErr = e; } }
     if (!svc) await wait(800);
   }
-  if (!svc) { try { dev.gatt.disconnect(); } catch (e) {} throw step('etapa 2 (achar o serviço da Puffco)', lastErr); }
-  S.cmd = await svc.getCharacteristic(CH.cmd); S.reply = await svc.getCharacteristic(CH.reply);
-  try { const vc = await svc.getCharacteristic(CH.version); const v = await vc.readValue(); log('versão do protocolo: ' + hex(new Uint8Array(v.buffer))); } catch (e) {}
-  S.reply.addEventListener('characteristicvaluechanged', onReply);
-  await S.reply.startNotifications(); log('respostas ativadas'); await wait(80);
-  // unlock
+  if (!svc) throw step('etapa 2 (achar o serviço da Puffco)', lastErr);
+  log('etapa 2 ok: serviço da Puffco');
+  try { S.cmd = await svc.getCharacteristic(CH.cmd); S.reply = await svc.getCharacteristic(CH.reply); } catch (e) { throw step('etapa 3 (canais de comando)', e); }
+  log('etapa 3 ok: canais de comando');
+  // reading this protected value is what makes the iPhone pair with the Proxy
+  try { const vc = await svc.getCharacteristic(CH.version); const v = await limit(vc.readValue(), 15000, 'o emparelhamento'); log('versão do protocolo: ' + hex(new Uint8Array(v.buffer))); } catch (e) { log('versão: ' + errText(e)); if (!S.server.connected) throw step('etapa 4 (emparelhar)', e); }
+  if (!S.reply.__np) { S.reply.addEventListener('characteristicvaluechanged', onReply); S.reply.__np = true; }
+  try { await limit(S.reply.startNotifications(), 15000, 'a ativação das respostas'); } catch (e) { throw step('etapa 5 (ativar respostas)', e); }
+  log('etapa 5 ok: respostas ativadas'); await wait(100);
   chip('Autenticando…', 'busy');
   try {
-    const r = await send(OP.seed);
+    const r = await send(OP.seed, undefined, 4000);
     log('semente: status ' + r.status + ', ' + r.data.length + ' bytes');
     if (r.status === 0 && r.data.length >= 16) {
       const token = (await sha256(cat(KEY, r.data.slice(0, 16)))).slice(0, 16);
-      const u = await send(OP.unlock, token); log('desbloqueio: status ' + u.status);
+      const u = await send(OP.unlock, token, 4000); log('desbloqueio: status ' + u.status + (u.status === 0 ? ' (ok)' : ' (recusado)'));
     }
-  } catch (e) { log('autenticação: ' + e.message); }
+  } catch (e) { log('etapa 6 (senha): ' + errText(e)); if (!S.server.connected) throw step('etapa 6 (senha de acesso)', e); }
   S.connected = true;
-  chip(dev.name || 'Proxy', 'on'); $('connect').textContent = 'Desconectar'; $('connect').classList.remove('primary'); $('demo').hidden = true; $('scan-all').hidden = true;
+  chip(S.name || dev.name || 'Proxy', 'on'); $('connect').textContent = 'Desconectar'; $('connect').classList.remove('primary'); $('demo').hidden = true; $('scan-all').hidden = true;
   notice(''); enable(true);
   await readAll(); render();
   clearInterval(S.poll); clearInterval(S.slow);
   S.poll = setInterval(fast, 1000); S.slow = setInterval(slowRead, 15000);
 }
 function onDisconnect() {
+  if (S.setup) { log('caiu durante a configuração'); return; }
   S.connected = false; S.cmd = null; clearInterval(S.poll); clearInterval(S.slow);
   for (const [, w] of S.wait) { clearTimeout(w.to); } S.wait.clear();
   chip('Desconectado'); $('connect').textContent = 'Conectar'; $('connect').classList.add('primary'); $('demo').hidden = false; $('scan-all').hidden = false; enable(false);
