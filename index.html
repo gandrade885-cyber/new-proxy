@@ -211,6 +211,7 @@ details[open] summary::after { content: "–"; }
     <div class="conn">
       <span class="chip" id="chip"><i></i><span id="chip-t">Desconectado</span></span>
       <button class="btn ghost" id="demo" type="button" title="Mostra o app funcionando com um Proxy simulado">Demonstração</button>
+      <button class="btn" id="scan-all" type="button" title="Mostra todos os aparelhos Bluetooth por perto">Buscar todos</button>
       <button class="btn primary" id="connect" type="button">Conectar</button>
     </div>
   </div>
@@ -446,12 +447,12 @@ async function connect(showAll) {
     chip('Procurando…', 'busy');
     const optionalServices = [SVC, DEVINFO];
     const opts = showAll ? { acceptAllDevices: true, optionalServices }
-      : { filters: [{ services: [SVC] }, { namePrefix: 'Proxy' }, { namePrefix: 'PROXY' }, { namePrefix: 'Puffco' }, { namePrefix: 'New Proxy' }], optionalServices };
+      : { filters: [{ services: [SVC] }, { namePrefix: 'Proxy' }, { namePrefix: 'PROXY' }, { namePrefix: 'proxy' }, { namePrefix: 'Puffco' }, { namePrefix: 'PUFFCO' }, { namePrefix: 'New Proxy' }], optionalServices };
     const dev = await navigator.bluetooth.requestDevice(opts);
     await attach(dev);
   } catch (e) {
     chip('Desconectado'); log('falha: ' + (e && (e.step || '') + ' ' + e.message));
-    if (e && e.name === 'NotFoundError') notice('Nenhum aparelho escolhido. Se o Proxy não apareceu: ligue o Proxy (5 cliques no botão acorda o Bluetooth), feche o app oficial da Puffco e tente de novo. Também dá para <button class="btn" type="button" id="show-all">procurar todos os aparelhos</button>');
+    if (e && e.name === 'NotFoundError') notice('Nenhum aparelho escolhido. Se o Proxy não apareceu: acorde o Proxy apertando o botão, feche de vez o app oficial da Puffco (e o Path Browser) e tente de novo. Ou <button class="btn" type="button" id="show-all">procurar todos os aparelhos</button>');
     else if (e && e.name === 'SecurityError') notice('O Mac bloqueou o Bluetooth para o Chrome. Abra Ajustes do Sistema › Privacidade e Segurança › Bluetooth e ative o Google Chrome.', 'err');
     else notice('Não consegui conectar. <small>(' + (e && e.message || e) + ')</small><br>Tente: feche o app oficial da Puffco, aperte o botão do Proxy para acordar e toque em Conectar. Se continuar, abra <b>Diagnóstico da conexão</b> e me mande o texto.', 'err');
   }
@@ -488,7 +489,7 @@ async function attach(dev) {
     }
   } catch (e) { log('autenticação: ' + e.message); }
   S.connected = true;
-  chip(dev.name || 'Proxy', 'on'); $('connect').textContent = 'Desconectar'; $('connect').classList.remove('primary'); $('demo').hidden = true;
+  chip(dev.name || 'Proxy', 'on'); $('connect').textContent = 'Desconectar'; $('connect').classList.remove('primary'); $('demo').hidden = true; $('scan-all').hidden = true;
   notice(''); enable(true);
   await readAll(); render();
   clearInterval(S.poll); clearInterval(S.slow);
@@ -497,7 +498,7 @@ async function attach(dev) {
 function onDisconnect() {
   S.connected = false; S.cmd = null; clearInterval(S.poll); clearInterval(S.slow);
   for (const [, w] of S.wait) { clearTimeout(w.to); } S.wait.clear();
-  chip('Desconectado'); $('connect').textContent = 'Conectar'; $('connect').classList.add('primary'); $('demo').hidden = false; enable(false);
+  chip('Desconectado'); $('connect').textContent = 'Conectar'; $('connect').classList.add('primary'); $('demo').hidden = false; $('scan-all').hidden = false; enable(false);
   notice('O Proxy desconectou. Se ele ainda estiver ligado, toque em Conectar. A sessão em andamento continua sendo contada.');
   log('desconectado'); render();
 }
@@ -792,20 +793,21 @@ function demoReply(op, payload) {
 }
 function startDemo() {
   S.demo = true; S.connected = true; S.profiles = [['Azul', 252, 30], ['Verde', 271, 30], ['Vermelho', 285, 45], ['Branco', 310, 45]].map(([name, c, time]) => ({ name, c, time, tfmt: 'f', nfmt: 'f' }));
-  chip('Demonstração', 'demo'); $('connect').textContent = 'Sair da demonstração'; $('connect').classList.remove('primary'); $('demo').hidden = true;
+  chip('Demonstração', 'demo'); $('connect').textContent = 'Sair da demonstração'; $('connect').classList.remove('primary'); $('demo').hidden = true; $('scan-all').hidden = true;
   notice('Modo demonstração: o app está simulando um Proxy. Nada é enviado para o aparelho e nada entra no seu registro.', 'ok');
   enable(true); S.bat = 82; S.dabs = 1287; buildProfiles(); fillEditor();
   demo.timer = setInterval(() => { demo.tick(); }, 250); clearInterval(S.poll); S.poll = setInterval(fast, 600); fast(); log('demonstração iniciada');
 }
 function stopDemo() {
   if (!S.demo) return; clearInterval(demo.timer); clearInterval(S.poll); S.demo = false; S.connected = false; S.state = 'off'; S.temp = null; S.lantern = false; S.bat = null; S.dabs = null;
-  chip('Desconectado'); $('connect').textContent = 'Conectar'; $('connect').classList.add('primary'); $('demo').hidden = false; notice(''); enable(false); buildProfiles(); render();
+  chip('Desconectado'); $('connect').textContent = 'Conectar'; $('connect').classList.add('primary'); $('demo').hidden = false; $('scan-all').hidden = false; notice(''); enable(false); buildProfiles(); render();
 }
 
 // ---------- controls ----------
 $('notice').addEventListener('click', e => { if (e.target.id === 'show-all') connect(true); });
 $('connect').addEventListener('click', () => { if (S.connected) disconnect(); else connect(); });
 $('demo').addEventListener('click', startDemo);
+$('scan-all').addEventListener('click', () => { if (!S.connected) connect(true); });
 $('heat').addEventListener('click', heatToggle);
 $('boost').addEventListener('click', boost);
 $('lant').addEventListener('click', lantern);
